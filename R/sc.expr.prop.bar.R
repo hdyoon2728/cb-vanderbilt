@@ -10,6 +10,7 @@
 #' 2. Multi-gene Support: Automatically creates faceted plots for multiple genes.
 #' 3. Automatic Annotation: Displays the exact percentage value on top of each bar.
 #' 4. Group Comparison: Visualizes the spread of expression across defined conditions.
+#' 5. Error Bar: Wilson score 95% CI based on cell count (n=1 sample per condition 상황을 위한 CI).
 #'
 #' @param seurat_obj A Seurat object.
 #' @param target_gene String or vector. Gene name(s) to analyze.
@@ -18,6 +19,7 @@
 #' @param celltypes String or vector. "all" for global analysis, or a vector of specific cell types.
 #' @param color_pal Custom color palette for groups.
 #' @param show_legend Logical. Toggle legend display (default: TRUE).
+#' @param show_errorbar Logical. Add Wilson score 95% CI error bars (default: TRUE).
 #' 
 #' @return A ggplot2 object.
 #' @author Hyundong Yoon
@@ -28,7 +30,8 @@ sc.expr.prop.bar <- function(seurat_obj,
                              celltype_var = "detailed.celltypes",
                              celltypes = "all",
                              color_pal = NULL,
-                             show_legend = TRUE) {
+                             show_legend = TRUE,
+                             show_errorbar = TRUE) {
   
   require(dplyr)
   require(ggplot2)
@@ -60,6 +63,8 @@ sc.expr.prop.bar <- function(seurat_obj,
     ) %>%
       group_by(group, gene) %>%
       summarise(
+        n_total = n(),
+        n_pos   = sum(expressed),
         pct = sum(expressed) / n() * 100,
         .groups = "drop"
       )
@@ -67,13 +72,36 @@ sc.expr.prop.bar <- function(seurat_obj,
   
   prop_df <- do.call(rbind, prop_list) %>% filter(!is.na(group))
   
+  # 3-1. Wilson score 95% CI (세포 수 n_total, 양성 세포 수 n_pos 기반)
+  if (show_errorbar) {
+    z <- qnorm(0.975)
+    prop_df <- prop_df %>%
+      rowwise() %>%
+      mutate(
+        p_hat  = n_pos / n_total,
+        denom  = 1 + z^2 / n_total,
+        center = (p_hat + z^2 / (2 * n_total)) / denom,
+        margin = (z * sqrt(p_hat * (1 - p_hat) / n_total + z^2 / (4 * n_total^2))) / denom,
+        ci_lower = pmax((center - margin) * 100, 0),
+        ci_upper = pmin((center + margin) * 100, 100)
+      ) %>%
+      ungroup() %>%
+      select(-p_hat, -denom, -center, -margin)
+  }
+  
   # 4. Visualization
   p <- ggplot(prop_df, aes(x = gene, y = pct, fill = group)) +
     geom_col(color = "black", size = 0.5, width = 0.8, 
              position = position_dodge(width = 0.85)) +
     
+    # Error bar 추가 (Wilson score 95% CI)
+    {if (show_errorbar) geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper),
+                                        position = position_dodge(width = 0.85),
+                                        width = 0.2, linewidth = 0.5)} +
+    
     # Numerical annotation on top
-    geom_text(aes(label = sprintf("%.1f%%", pct)), 
+    geom_text(aes(label = sprintf("%.1f%%", pct),
+                  y = if (show_errorbar) ci_upper else pct), 
               position = position_dodge(width = 0.85),
               vjust = -0.5, 
               fontface = "bold", 
@@ -98,6 +126,13 @@ sc.expr.prop.bar <- function(seurat_obj,
     p <- p + scale_fill_manual(values = color_pal)
   }
   
+  # Legend control
+  if (!show_legend) {
+    p <- p + theme(legend.position = "none")
+  }
+  
+  return(p)
+}
   # Legend control
   if (!show_legend) {
     p <- p + theme(legend.position = "none")
